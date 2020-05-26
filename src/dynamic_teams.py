@@ -54,7 +54,7 @@ def main() -> object:
             request['observers'].append({"name": observer})
 
         # execute the creation
-        xm_dynamic_teams.create_dynamic_team(request)
+        # xm_dynamic_teams.create_dynamic_team(request)
 
 # entry point when file initiated
 if __name__ == "__main__":

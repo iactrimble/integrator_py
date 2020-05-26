@@ -49,7 +49,7 @@ def main() -> object:
 
             # if the total returned from the the search is greater than the config page size, then we have more searching to do
             if people_search['total'] > config.people['page_size']:
-                people_collection = xm_collection.get_collection(xm_person.get_people, people['total'],
+                people_collection = xm_collection.get_collection(xm_person.get_people, people_search['total'],
                                                                  config.people['page_size'], param_data,
                                                                  config.people['thread_count'])
 
