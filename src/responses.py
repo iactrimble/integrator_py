@@ -15,7 +15,7 @@ import csv
 def main() -> object:
 
     """
-        1. Query for all events related to a form and push it to an array
+        1. Query for all events where a form property is set to true and push it to an array
         2. Query for audits of each individual event and push it to an array
         3. Write to a CSV
 
@@ -25,18 +25,46 @@ def main() -> object:
     # today_date = '2020-04-15'  # uncomment to override above to a past date stamp
     log.info(today_date)
 
-    events = xm_event.get_events(
-        'form=' + urllib.parse.quote(config.responses['form'], safe='') + '&from=' + today_date +
-        urllib.parse.quote('T00:00:00.000Z', safe=''))
+    events = xm_event.get_events('embed=targetedRecipients&propertyName=response_report&propertyValue=true&from=' + today_date +urllib.parse.quote('T00:00:00.000Z', safe=''))
 
-    log.info('Received events ' + json.dumps(events))
+    log.debug('Received events ' + json.dumps(events))
 
     log.info('Getting User Deliveries for ' + str(len(events['data'])) + ' events.')
-    current_date_time = datetime.datetime.now()
+    current_date_time = datetime.datetime.utcnow()
 
     csv_data = []
     for event in events['data']:
 
+        # collect details about each event
+        event_details = {
+            "event_id": event['eventId'],
+            "event_uuid": event['id'],
+            "workflow_id": event['plan']['id'],
+            "workflow_name": event['plan']['name'],
+            "form_id": event['form']['id'],
+            "form_name": event['form']['name'],
+        }
+
+        # collect the directly targeted recipient(s).  Groups, dynamic teams or people
+        recipientTargetName = []
+        recipientTargetType = []
+        peopleRecipients = []
+        dynamicTeamRecipients = []
+        groupRecipients = []
+        if "recipients" in event:
+            if event["recipients"]["count"] > 0:
+                for recipient in event["recipients"]["data"]:
+                    if recipient["recipientType"] == "PERSON":
+                        peopleRecipients.append(recipient["targetName"])
+                    if recipient["recipientType"] == "DYNAMIC_TEAM":
+                        dynamicTeamRecipients.append(recipient["targetName"])
+                    if recipient["recipientType"] == "GROUP":
+                        groupRecipients.append(recipient["targetName"])
+
+        # event_details["recipientTargetName"] = recipientTargetName
+        # event_details["recipientTargetType"] = recipientTargetType
+
+        # get notification delivery details for each recipient
         event_user_delivery = xm_event.get_user_deliveries(event['id'], 'at=' + str(
             current_date_time.strftime('%Y-%m-%dT%H:%M:%SZ')) + '&offset=0&limit='+str(config.responses['page_size']))
 
@@ -57,6 +85,7 @@ def main() -> object:
 
         log.debug('Event ID: ' + event['eventId'] + ', retrieved event_user_delivery data: ' + json.dumps(event_user_delivery))
         log.info('Event ID: ' + event['eventId'] + ', retrieved event_user_delivery number: ' + str(len(event_user_delivery)))
+
         counter = 0
 
         for data in event_user_delivery:
@@ -67,24 +96,54 @@ def main() -> object:
                     user_name = data['person']['targetName']
                 else:
                     log.debug('No targetName found for user id: ' + data['person']['id'] + ' attempting to get current targetName')
-                    user_name = (xm_person.get_person(data['person']['id']))['targetName']  # by designed to throw an exception if fails
+                    user_name = (xm_person.get_person(data['person']['id']))['targetName']  # by design to throw an exception if fails
                     log.debug('targetName received for ' + user_name)
 
+
+                # find out how the user was initially targeted
+                # the API does not currently identify if a user was targeted via a dynamic team
+                # it does identify if the user was targeted via a group or if the user was targeted directly
+                if user_name in peopleRecipients:
+                    event_details["recipientTargetName"] = user_name
+                    event_details['recipientTargetType'] = "PERSON"
+                else:
+                    event_details["recipientTargetName"] = dynamicTeamRecipients
+                    event_details['recipientTargetType'] = "DYNAMIC TEAM"
+
+                if "notifications" in data:
+                    if "data" in data["notifications"]:
+                        if data["notifications"]["count"] > 0:
+                            for rec in data["notifications"]["data"]:
+                                if rec["category"] == 'GROUP': #phew! we got here
+                                    event_details["recipientTargetName"] = rec["recipient"]["targetName"]
+                                    event_details['recipientTargetType'] = "GROUP"
+
+                # build array of objects to write to CSV file
                 if data['deliveryStatus'] == "RESPONDED":
                     csv_data.append(dict(targetName=user_name,
                                          response=data['response']['text'],
-                                         event_created=str(datetime.datetime.fromisoformat(
-                                             event['created'].replace('+0000', "")).isoformat()),
+                                         event_created=str(event['created'].replace('+0000', "")),
                                          retrieved_date_time=str(current_date_time.isoformat()),
-                                         delivery_status=data['deliveryStatus']))
+                                         delivery_status=data['deliveryStatus'],
+                                         workflow=event_details['workflow_name'],
+                                         form=event_details['form_name'],
+                                         event_id=event_details['event_id'],
+                                         # event_uuid=event_details['event_uuid'],
+                                         recipientTargetName=str(event_details['recipientTargetName']),
+                                         recipientTargetType=str(event_details['recipientTargetType'])))
                     counter = counter + 1
                 elif data['deliveryStatus'] == "DELIVERED":
                     csv_data.append(dict(targetName=user_name,
                                          response="",
-                                         event_created=str(datetime.datetime.fromisoformat(
-                                             event['created'].replace('+0000', "")).isoformat()),
+                                         event_created=str(event['created'].replace('+0000', "")),
                                          retrieved_date_time=str(current_date_time.isoformat()),
-                                         delivery_status=data['deliveryStatus']))
+                                         delivery_status=data['deliveryStatus'],
+                                         workflow=event_details['workflow_name'],
+                                         form=event_details['form_name'],
+                                         event_id=event_details['event_id'],
+                                         # event_uuid=event_details['event_uuid'],
+                                         recipientTargetName=str(event_details['recipientTargetName']),
+                                         recipientTargetType=str(event_details['recipientTargetType'])))
                     counter = counter + 1
                 else:
                     log.info('Not adding to csv writer array, unexpected information: ' + json.dumps(data))  # unlikely, but let's just log to make sure
@@ -98,19 +157,39 @@ def main() -> object:
 
     if len(csv_data) > 0:
         try:
-            with open(config.responses['file_name'], 'w', newline='', encoding=config.responses['encoding']) as csv_file:
-                csv_writer = csv.writer(csv_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
+            with open(config.responses['file_name_new'], 'w', newline='', encoding=config.responses['encoding']) as csv_file_new:
+                csv_writer = csv.writer(csv_file_new, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
 
                 # write the header
-                csv_writer.writerow(['key', 'targetName', 'response', 'event_created', 'retrieved_date_time', 'delivery_status'])
+                csv_writer.writerow(['key', 'targetName', 'response', 'event_created', 'retrieved_date_time', 'delivery_status', 'workflow', 'form', 'event_id', 'recipientTargetName', 'recipientTargetType'])
 
                 # write the values
                 for row in csv_data:
-                    primary_key = row['targetName']+" "+row['event_created']
-                    csv_writer.writerow([primary_key, row['targetName'], row['response'], row['event_created'], row['retrieved_date_time'], row['delivery_status']])
+                    primary_key = row['targetName']+" "+ event_details['event_uuid']
+                    csv_writer.writerow([primary_key, row['targetName'], row['response'], row['event_created'], row['retrieved_date_time'], row['delivery_status'], row['workflow'], row['form'], row['event_id'], row['recipientTargetName'], row['recipientTargetType']])
 
         except Exception as e:
-            log.error('Exception while writing to csv file name: '+str(config.responses['file_name'])+' with exception: ' + str(e))
+            log.error('Exception while writing to csv file name: '+str(config.responses['file_name_new'])+' with exception: ' + str(e))
+
+        try:
+            with open(config.responses['file_name'], 'w', newline='',
+                      encoding=config.responses['encoding']) as csv_file:
+                csv_writer = csv.writer(csv_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
+
+                # write the header
+                csv_writer.writerow(
+                    ['key', 'targetName', 'response', 'event_created', 'retrieved_date_time', 'delivery_status'])
+
+                # write the values
+                for row in csv_data:
+                    primary_key = row['targetName'] + " " + row['event_created']
+                    csv_writer.writerow([primary_key, row['targetName'], row['response'], row['event_created'],
+                                         row['retrieved_date_time'], row['delivery_status']])
+
+        except Exception as e:
+            log.error('Exception while writing to csv file name: ' + str(
+                config.responses['file_name']) + ' with exception: ' + str(e))
+
 
 if __name__ == "__main__":
     # configure the logging
